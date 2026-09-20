@@ -90,6 +90,70 @@ function bebba_filter_user_has_cap($allcaps, $caps, $args, $user) {
 add_filter('user_has_cap', 'bebba_filter_user_has_cap', 10, 4);
 
 /**
+ * Modifie le libellé de la page "Connexion BEBBA" dans les menus de navigation
+ * selon l'état de connexion de l'utilisateur.
+ * Cible la page par son post_name 'connexion-bebba' (post_type 'page').
+ */
+function bebba_filter_navigation_page_title($pages, $args) {
+    if (is_admin()) {
+        return $pages;
+    }
+
+    foreach ($pages as $page) {
+        if (
+            isset($page->post_name) &&
+            $page->post_name === 'connexion-bebba' &&
+            isset($page->post_type) &&
+            $page->post_type === 'page'
+        ) {
+            $page->post_title = is_user_logged_in() ? 'Connecté à BEBBA' : 'Connexion BEBBA';
+        }
+    }
+
+    return $pages;
+}
+
+add_filter('get_pages', 'bebba_filter_navigation_page_title', 10, 2);
+
+/**
+ * Remplace le lien "Connecté à BEBBA" par un texte simple dans la navigation
+ * lorsque l'utilisateur est connecté.
+ * Utilise pre_render_block pour intercepter le rendu de core/page-list.
+ */
+function bebba_filter_page_list_render($pre_render, $parsed_block) {
+    if (
+        ! isset($parsed_block['blockName']) ||
+        $parsed_block['blockName'] !== 'core/page-list' ||
+        is_admin() ||
+        ! is_user_logged_in()
+    ) {
+        return $pre_render;
+    }
+
+    // Rendu original du bloc page-list
+    $html = render_block_core_page_list(
+        $parsed_block['attrs'] ?? [],
+        $parsed_block['innerHTML'] ?? '',
+        new WP_Block($parsed_block)
+    );
+
+    // URL de la page connexion-bebba
+    $connexion_url = esc_url(home_url('/connexion-bebba/'));
+
+    // Remplacer le lien par un span pour cette page spécifique
+    // Accepte les attributs éventuels entre href et > (ex: aria-current="page")
+    $html = preg_replace(
+        '#<a class="wp-block-pages-list__item__link[^"]*" href="' . preg_quote($connexion_url, '#') . '"[^>]*>Connecté à BEBBA</a>#',
+        '<span class="wp-block-pages-list__item__link">Connecté à BEBBA</span>',
+        $html
+    );
+
+    return $html;
+}
+
+add_filter('pre_render_block', 'bebba_filter_page_list_render', 10, 2);
+
+/**
  * Vérifie la présence des tables principales BEBBA.
  */
 function bebba_check_database() {
@@ -544,6 +608,16 @@ function bebba_handle_login() {
         return new WP_Error('login_failed', 'Identifiant ou mot de passe incorrect.');
     }
 
+    // Vérifier que l'utilisateur possède au moins un rôle BEBBA
+    $bebba_roles = array('bebba_administrator', 'bebba_cuisine', 'bebba_livreur', 'bebba_client');
+    $has_bebba_role = array_intersect($bebba_roles, (array) $user->roles);
+
+    if (empty($has_bebba_role)) {
+        // L'utilisateur n'a pas de rôle BEBBA : refuser la connexion BEBBA
+        // NE PAS appeler wp_logout() pour ne pas affecter la session WordPress existante
+        return new WP_Error('login_failed', 'Identifiant ou mot de passe incorrect.');
+    }
+
     return $user;
 }
 
@@ -577,13 +651,18 @@ function bebba_process_auth_forms() {
                 if (is_wp_error($result)) {
                     bebba_set_flash_error($result->get_error_message());
                 } else {
-                    bebba_set_flash_success('Inscription réussie. Vous êtes maintenant connecté.');
                     $creds = array(
-                        'user_login'    => $_POST['bebba_user_login'] ?? bebba_generate_user_login(bebba_normalize_phone('+' . ($_POST['bebba_phone_country'] ?? '') . ($_POST['bebba_phone_national'] ?? ''))),
+                        'user_login'    => bebba_generate_user_login(bebba_normalize_phone('+' . ($_POST['bebba_phone_country'] ?? '') . ($_POST['bebba_phone_national'] ?? ''))),
                         'user_password' => $_POST['bebba_password'] ?? '',
                         'remember'      => false,
                     );
-                    wp_signon($creds, false);
+                    $signon_result = wp_signon($creds, false);
+                    if (is_wp_error($signon_result)) {
+                        bebba_set_flash_error('Connexion automatique échouée : ' . $signon_result->get_error_message());
+                    } else {
+                        wp_safe_redirect(wp_unslash($_SERVER['REQUEST_URI']));
+                        exit;
+                    }
                 }
                 break;
 
@@ -591,6 +670,9 @@ function bebba_process_auth_forms() {
                 $result = bebba_handle_login();
                 if (is_wp_error($result)) {
                     bebba_set_flash_error($result->get_error_message());
+                } else {
+                    wp_safe_redirect(wp_unslash($_SERVER['REQUEST_URI']));
+                    exit;
                 }
                 break;
 
@@ -643,26 +725,31 @@ function bebba_get_flash_success() {
  * Shortcode [bebba_auth] : affiche inscription/connexion ou état connecté.
  */
 function bebba_auth_shortcode() {
-    if (is_user_logged_in()) {
-        $current_user = wp_get_current_user();
-        $bebba_roles = array('bebba_administrator', 'bebba_cuisine', 'bebba_livreur', 'bebba_client');
-        $user_bebba_role = '';
-        foreach ($bebba_roles as $role) {
-            if (in_array($role, $current_user->roles, true)) {
-                $user_bebba_role = $role;
-                break;
-            }
+    $current_user = wp_get_current_user();
+    $bebba_roles = array('bebba_administrator', 'bebba_cuisine', 'bebba_livreur', 'bebba_client');
+    $user_bebba_role = '';
+    foreach ($bebba_roles as $role) {
+        if (in_array($role, (array) $current_user->roles, true)) {
+            $user_bebba_role = $role;
+            break;
         }
+    }
 
+    $is_bebba_user = ! empty($user_bebba_role);
+
+    if ($is_bebba_user) {
         $phone = get_user_meta($current_user->ID, 'bebba_phone', true);
         $obfuscated_phone = $phone ? '******' . substr($phone, -4) : 'Non défini';
+        $is_client = $user_bebba_role === 'bebba_client';
 
         ob_start();
         ?>
         <div class="bebba-auth bebba-auth--logged-in">
             <h3>Espace Client BEBBA</h3>
-            <p><strong>Identifiant BHF :</strong> <?php echo esc_html($current_user->user_login); ?></p>
-            <p><strong>Rôle :</strong> <?php echo esc_html($user_bebba_role ?: 'Aucun rôle BEBBA'); ?></p>
+            <p><strong>Identifiant :</strong> <?php echo esc_html($current_user->user_login); ?></p>
+            <?php if (!$is_client) : ?>
+                <p><strong>Rôle :</strong> <?php echo esc_html($user_bebba_role ?: 'Aucun rôle BEBBA'); ?></p>
+            <?php endif; ?>
             <p><strong>Téléphone :</strong> <?php echo esc_html($obfuscated_phone); ?></p>
             <form method="post" action="">
                 <?php wp_nonce_field('bebba_logout', 'bebba_logout_nonce'); ?>
@@ -674,6 +761,7 @@ function bebba_auth_shortcode() {
         return ob_get_clean();
     }
 
+    // Utilisateur non connecté BEBBA (même s'il est connecté à WordPress)
     $error = bebba_get_flash_error();
     $success = bebba_get_flash_success();
 
