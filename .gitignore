@@ -1,8 +1,6 @@
-node_modules/
-build/
-dist/
-coverage/
-.DS_Store
-*.log
-.env*
-!.env.example
+*
+!.gitignore
+!wp-content/
+!wp-content/plugins/
+!wp-content/plugins/bebba/
+!wp-content/plugins/bebba/**
