@@ -2,7 +2,7 @@
 /*
 Plugin Name: BEBBA Healthy Food
 Description: Gestion de BEBBA Healthy Food.
-Version: 1.0.0
+Version: 1.1.0
 Author: BEBBA
 */
 
@@ -66,6 +66,70 @@ function bebba_register_roles() {
 }
 
 register_activation_hook(__FILE__, 'bebba_register_roles');
+register_activation_hook(__FILE__, 'bebba_create_pages');
+
+function bebba_commande_shortcode() {
+    bebba_enqueue_menu_assets();
+    ob_start();
+    ?>
+    <div id="bebba-menu" class="bebba-menu" role="main"></div>
+    <aside id="bebba-cart-panel" class="bebba-cart-panel" aria-label="Panier">
+        <div class="bebba-cart-panel__header">
+            <h2 class="bebba-cart-panel__title">🛒 Mon panier</h2>
+            <button id="bebba-cart-close" class="bebba-modal__close" aria-label="Fermer le panier">&times;</button>
+        </div>
+        <div id="bebba-cart-items" class="bebba-cart-panel__items"></div>
+        <div class="bebba-cart-panel__footer">
+            <div class="bebba-cart-panel__fee-row">
+                <span>Livraison</span>
+                <span id="bebba-delivery-fee">0.00 DT</span>
+            </div>
+            <div class="bebba-cart-panel__total-row">
+                <span>Total</span>
+                <strong id="bebba-cart-grand-total">0.00 DT</strong>
+            </div>
+            <a href="<?php echo esc_url(home_url('/commande/')); ?>" id="bebba-checkout-btn" class="bebba-checkout-btn">
+                Commander
+            </a>
+        </div>
+    </aside>
+    <div id="bebba-cart-backdrop" class="bebba-cart-backdrop" hidden></div>
+    <script>
+    (function(){
+      if(typeof updateCartUI === 'function'){ updateCartUI(); }
+    })();
+    </script>
+    <?php
+    return ob_get_clean();
+}
+add_shortcode('bebba_commande', 'bebba_commande_shortcode');
+
+/**
+ * Crée les pages WordPress /menu/ et /commande/ à l'activation du plugin.
+ */
+function bebba_create_pages() {
+    $menu_page = get_page_by_path('menu');
+    if (!$menu_page) {
+        wp_insert_post(array(
+            'post_title'   => 'Menu BEBBA',
+            'post_name'    => 'menu',
+            'post_type'    => 'page',
+            'post_status'  => 'publish',
+            'post_content' => '[bebba_menu]',
+        ));
+    }
+    $commande_page = get_page_by_path('commande');
+    if (!$commande_page) {
+        wp_insert_post(array(
+            'post_title'   => 'Commande BEBBA',
+            'post_name'    => 'commande',
+            'post_type'    => 'page',
+            'post_status'  => 'publish',
+            'post_content' => '[bebba_commande]',
+        ));
+    }
+    flush_rewrite_rules();
+}
 
 /**
  * Accorde l'accès aux capacités BEBBA aux administrateurs WordPress
@@ -876,3 +940,349 @@ function bebba_auth_shortcode() {
 }
 
 add_shortcode('bebba_auth', 'bebba_auth_shortcode');
+
+/* ============================================================
+ * SECTION 2 — REST API : GET /wp-json/bebba/v1/menu
+ * Retourne catégories actives + produits + options + suppléments
+ * ============================================================ */
+
+/**
+ * Enregistre les endpoints REST BEBBA.
+ */
+function bebba_register_rest_routes() {
+    register_rest_route('bebba/v1', '/menu', array(
+        'methods'             => WP_REST_Server::READABLE,
+        'callback'            => 'bebba_rest_menu',
+        'permission_callback' => '__return_true',
+    ));
+}
+
+add_action('rest_api_init', 'bebba_register_rest_routes');
+
+/**
+ * Handler REST GET /wp-json/bebba/v1/menu
+ * Retourne le catalogue complet structuré pour le frontend.
+ *
+ * @return WP_REST_Response
+ */
+function bebba_rest_menu() {
+    global $wpdb;
+
+    // --- Catégories actives ---
+    $categories_raw = $wpdb->get_results(
+        "SELECT id, name, slug, icon, image_url, sort_order
+         FROM bebba_categories
+         WHERE active = 1
+         ORDER BY sort_order ASC, id ASC"
+    );
+
+    // --- Produits actifs avec leur catégorie ---
+    $products_raw = $wpdb->get_results(
+        "SELECT
+             p.id,
+             p.category_id,
+             p.name,
+             p.description,
+             p.base_price,
+             p.image_url,
+             p.calories,
+             p.protein_grams,
+             p.carbs_grams,
+             p.fat_grams,
+             p.is_available,
+             p.is_popular,
+             p.sort_order
+         FROM bebba_products p
+         WHERE p.active = 1 AND p.is_available = 1
+         ORDER BY p.sort_order ASC, p.id ASC"
+    );
+
+    if (empty($products_raw)) {
+        return new WP_REST_Response(array(
+            'categories' => array(),
+            'products'   => array(),
+        ), 200);
+    }
+
+    // Collecte des IDs produits
+    $product_ids = array_map(function($p) { return (int) $p->id; }, $products_raw);
+    $ids_placeholder = implode(',', $product_ids);
+
+    // --- Options produit (protein / veggies / base) ---
+    $options_raw = $wpdb->get_results(
+        "SELECT id, product_id, option_type, position, label, extra_price, extra_grams, sort_order, is_default
+         FROM bebba_product_options
+         WHERE product_id IN ({$ids_placeholder})
+         ORDER BY product_id ASC, option_type ASC, sort_order ASC, position ASC"
+    );
+
+    // --- Suppléments disponibles par produit ---
+    $supplements_raw = $wpdb->get_results(
+        "SELECT
+             ps.product_id,
+             s.id         AS supplement_id,
+             s.name,
+             s.description,
+             s.price,
+             s.available,
+             ps.sort_order
+         FROM bebba_product_supplements ps
+         JOIN bebba_supplements s ON s.id = ps.supplement_id
+         WHERE ps.product_id IN ({$ids_placeholder})
+           AND s.active = 1
+           AND s.available = 1
+         ORDER BY ps.product_id ASC, ps.sort_order ASC"
+    );
+
+    // --- Indexation options par product_id et option_type ---
+    $options_by_product = array();
+    foreach ($options_raw as $opt) {
+        $pid  = (int) $opt->product_id;
+        $type = $opt->option_type;
+        if (!isset($options_by_product[$pid])) {
+            $options_by_product[$pid] = array();
+        }
+        if (!isset($options_by_product[$pid][$type])) {
+            $options_by_product[$pid][$type] = array();
+        }
+        $options_by_product[$pid][$type][] = array(
+            'id'          => (int)   $opt->id,
+            'label'       =>         $opt->label,
+            'extra_price' => (float) $opt->extra_price,
+            'extra_grams' => $opt->extra_grams !== null ? (float) $opt->extra_grams : null,
+            'is_default'  => (bool)  $opt->is_default,
+        );
+    }
+
+    // --- Indexation suppléments par product_id ---
+    $supplements_by_product = array();
+    foreach ($supplements_raw as $sup) {
+        $pid = (int) $sup->product_id;
+        if (!isset($supplements_by_product[$pid])) {
+            $supplements_by_product[$pid] = array();
+        }
+        $supplements_by_product[$pid][] = array(
+            'id'          => (int)   $sup->supplement_id,
+            'name'        =>         $sup->name,
+            'description' =>         $sup->description,
+            'price'       => (float) $sup->price,
+        );
+    }
+
+    // --- Construction produits enrichis ---
+    $products = array();
+    foreach ($products_raw as $p) {
+        $pid = (int) $p->id;
+        $products[] = array(
+            'id'           => $pid,
+            'category_id'  => (int)   $p->category_id,
+            'name'         =>         $p->name,
+            'description'  =>         $p->description,
+            'base_price'   => (float) $p->base_price,
+            'image_url'    =>         $p->image_url,
+            'calories'     => $p->calories    !== null ? (int)   $p->calories    : null,
+            'protein_g'    => $p->protein_grams !== null ? (float) $p->protein_grams : null,
+            'carbs_g'      => $p->carbs_grams  !== null ? (float) $p->carbs_grams  : null,
+            'fat_g'        => $p->fat_grams    !== null ? (float) $p->fat_grams    : null,
+            'is_popular'   => (bool)  $p->is_popular,
+            'options'      => $options_by_product[$pid]     ?? array(),
+            'supplements'  => $supplements_by_product[$pid] ?? array(),
+        );
+    }
+
+    // --- Construction catégories enrichies (seulement celles qui ont des produits) ---
+    $cat_ids_with_products = array_unique(
+        array_map(function($pr) { return $pr['category_id']; }, $products)
+    );
+
+    $categories = array();
+    foreach ($categories_raw as $c) {
+        if (!in_array((int) $c->id, $cat_ids_with_products, true)) {
+            continue;
+        }
+        $categories[] = array(
+            'id'        => (int) $c->id,
+            'name'      =>       $c->name,
+            'slug'      =>       $c->slug,
+            'icon'      =>       $c->icon,
+            'image_url' =>       $c->image_url,
+        );
+    }
+
+    return new WP_REST_Response(array(
+        'categories' => $categories,
+        'products'   => $products,
+    ), 200);
+}
+
+/* ============================================================
+ * SECTION 3 — Shortcode [bebba_menu]
+ * Catalogue public : onglets catégories, produits, modal config,
+ * panier localStorage.
+ * ============================================================ */
+
+/**
+ * Enqueue CSS + JS dédiés au catalogue (uniquement quand le shortcode est rendu).
+ */
+function bebba_enqueue_menu_assets() {
+    wp_enqueue_style(
+        'bebba-menu',
+        plugin_dir_url(__FILE__) . 'assets/css/menu.css',
+        array(),
+        '1.1.0'
+    );
+    wp_enqueue_script(
+        'bebba-menu',
+        plugin_dir_url(__FILE__) . 'assets/js/menu.js',
+        array(),
+        '1.1.0',
+        true
+    );
+    wp_localize_script('bebba-menu', 'BEBBA_MENU', array(
+        'api_url'       => esc_url_raw(rest_url('bebba/v1/menu')),
+        'nonce'         => wp_create_nonce('wp_rest'),
+        'currency'      => 'DT',
+        'delivery_fee'  => 0,
+        'login_url'     => esc_url(home_url('/connexion-bebba/')),
+        'is_logged_in'  => is_user_logged_in(),
+    ));
+}
+
+/**
+ * Shortcode [bebba_menu] — rendu de la coquille HTML.
+ */
+function bebba_menu_shortcode() {
+    bebba_create_pages();
+    bebba_enqueue_menu_assets();
+
+    ob_start();
+    ?>
+    <div id="bebba-menu" class="bebba-menu" role="main">
+
+        <!-- En-tête catalogue -->
+        <header class="bebba-menu__header">
+            <div class="bebba-menu__header-inner">
+                <h1 class="bebba-menu__title">Notre <span>Menu</span></h1>
+                <p class="bebba-menu__subtitle">Sain, savoureux, livré chez vous</p>
+            </div>
+            <!-- Panier flottant -->
+            <button id="bebba-cart-btn" class="bebba-cart-btn" aria-label="Voir mon panier" style="display:none;">
+                <span class="bebba-cart-btn__icon">🛒</span>
+                <span id="bebba-cart-count" class="bebba-cart-btn__count">0</span>
+                <span id="bebba-cart-total" class="bebba-cart-btn__total">0.00 DT</span>
+            </button>
+        </header>
+
+        <!-- Filtres catégories -->
+        <nav id="bebba-cats" class="bebba-cats" aria-label="Catégories" role="tablist">
+            <div class="bebba-cats__track">
+                <button class="bebba-cat-btn active" data-cat="all" role="tab" aria-selected="true">
+                    <span class="bebba-cat-btn__icon">🍽️</span>
+                    <span>Tout</span>
+                </button>
+            </div>
+        </nav>
+
+        <!-- Grille produits -->
+        <section id="bebba-products-grid" class="bebba-products-grid" aria-live="polite">
+            <div class="bebba-loader">
+                <span class="bebba-loader__dot"></span>
+                <span class="bebba-loader__dot"></span>
+                <span class="bebba-loader__dot"></span>
+            </div>
+        </section>
+
+        <!-- Modal configuration produit -->
+        <div id="bebba-modal-overlay" class="bebba-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="bebba-modal-name" hidden>
+            <div class="bebba-modal">
+                <button id="bebba-modal-close" class="bebba-modal__close" aria-label="Fermer">&times;</button>
+
+                <div class="bebba-modal__hero">
+                    <div id="bebba-modal-img" class="bebba-modal__img"></div>
+                    <div class="bebba-modal__hero-info">
+                        <span id="bebba-modal-badge" class="bebba-modal__badge" hidden>🔥 Populaire</span>
+                        <h2 id="bebba-modal-name" class="bebba-modal__name"></h2>
+                        <p id="bebba-modal-desc" class="bebba-modal__desc"></p>
+                        <div id="bebba-modal-macros" class="bebba-modal__macros"></div>
+                    </div>
+                </div>
+
+                <div class="bebba-modal__body">
+
+                    <!-- Options protein -->
+                    <div id="bebba-opts-protein" class="bebba-modal__opts-group" hidden>
+                        <h3 class="bebba-modal__opts-title">🥩 Protéine</h3>
+                        <div id="bebba-opts-protein-list" class="bebba-modal__opts-list"></div>
+                    </div>
+
+                    <!-- Options veggies -->
+                    <div id="bebba-opts-veggies" class="bebba-modal__opts-group" hidden>
+                        <h3 class="bebba-modal__opts-title">🥗 Légumes</h3>
+                        <div id="bebba-opts-veggies-list" class="bebba-modal__opts-list"></div>
+                    </div>
+
+                    <!-- Options base -->
+                    <div id="bebba-opts-base" class="bebba-modal__opts-group" hidden>
+                        <h3 class="bebba-modal__opts-title">🌾 Base</h3>
+                        <div id="bebba-opts-base-list" class="bebba-modal__opts-list"></div>
+                    </div>
+
+                    <!-- Suppléments -->
+                    <div id="bebba-supplements" class="bebba-modal__opts-group" hidden>
+                        <h3 class="bebba-modal__opts-title">➕ Suppléments</h3>
+                        <div id="bebba-supplements-list" class="bebba-modal__supplements-list"></div>
+                    </div>
+
+                    <!-- Instructions spéciales -->
+                    <div class="bebba-modal__opts-group">
+                        <h3 class="bebba-modal__opts-title">📝 Instructions spéciales</h3>
+                        <textarea id="bebba-special-instructions" class="bebba-modal__instructions"
+                            placeholder="Allergies, préférences, demandes particulières…" maxlength="300" rows="2"></textarea>
+                    </div>
+
+                </div><!-- /.bebba-modal__body -->
+
+                <!-- Footer modal : quantité + total + ajout panier -->
+                <footer class="bebba-modal__footer">
+                    <div class="bebba-modal__qty">
+                        <button id="bebba-qty-minus" class="bebba-qty-btn" aria-label="Diminuer la quantité">−</button>
+                        <span id="bebba-qty-val" class="bebba-qty-val">1</span>
+                        <button id="bebba-qty-plus" class="bebba-qty-btn" aria-label="Augmenter la quantité">+</button>
+                    </div>
+                    <button id="bebba-add-to-cart" class="bebba-add-to-cart">
+                        Ajouter — <span id="bebba-modal-line-total">0.00 DT</span>
+                    </button>
+                </footer>
+
+            </div><!-- /.bebba-modal -->
+        </div><!-- /.bebba-modal-overlay -->
+
+        <!-- Panneau panier latéral -->
+        <aside id="bebba-cart-panel" class="bebba-cart-panel" aria-label="Panier" hidden>
+            <div class="bebba-cart-panel__header">
+                <h2 class="bebba-cart-panel__title">🛒 Mon panier</h2>
+                <button id="bebba-cart-close" class="bebba-modal__close" aria-label="Fermer le panier">&times;</button>
+            </div>
+            <div id="bebba-cart-items" class="bebba-cart-panel__items"></div>
+            <div class="bebba-cart-panel__footer">
+                <div class="bebba-cart-panel__fee-row">
+                    <span>Livraison</span>
+                    <span id="bebba-delivery-fee">0.00 DT</span>
+                </div>
+                <div class="bebba-cart-panel__total-row">
+                    <span>Total</span>
+                    <strong id="bebba-cart-grand-total">0.00 DT</strong>
+                </div>
+                <a href="<?php echo esc_url(home_url('/commande/')); ?>" id="bebba-checkout-btn" class="bebba-checkout-btn">
+                    Commander
+                </a>
+            </div>
+        </aside>
+        <div id="bebba-cart-backdrop" class="bebba-cart-backdrop" hidden></div>
+
+    </div><!-- /#bebba-menu -->
+    <?php
+    return ob_get_clean();
+}
+
+add_shortcode('bebba_menu', 'bebba_menu_shortcode');
