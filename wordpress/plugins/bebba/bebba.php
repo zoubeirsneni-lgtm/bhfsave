@@ -10,6 +10,9 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+/* BLOC 8.1 — passage de commande (endpoint REST + page de commande). */
+require_once __DIR__ . '/includes/order-creation.php';
+
 /**
  * Capacités BEBBA par rôle.
  */
