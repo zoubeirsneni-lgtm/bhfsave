@@ -481,3 +481,659 @@ function bebba_oc_canonical_hash($payload) {
     return hash('sha256', $canonique);
 }
 
+/* ============================================================================
+ * 6. CRÉATION DE LA COMMANDE — TRANSACTION ATOMIQUE
+ * ========================================================================== */
+
+/**
+ * Handler REST POST /wp-json/bebba/v1/orders
+ *
+ * @param WP_REST_Request $request Requête.
+ * @return WP_REST_Response|WP_Error
+ */
+function bebba_rest_create_order($request) {
+    global $wpdb;
+
+    /* ---------- 6.1 Lecture et validation du corps ---------- */
+    $body = $request->get_json_params();
+    if (!is_array($body)) {
+        return new WP_Error('bebba_invalid_body', 'Corps de requête JSON invalide.', array('status' => 400));
+    }
+
+    $client = isset($body['client']) && is_array($body['client']) ? $body['client'] : array();
+    $name   = isset($client['name']) ? trim((string) $client['name']) : '';
+    $phone  = isset($client['phone']) ? trim((string) $client['phone']) : '';
+    $addr   = isset($client['deliveryAddress']) ? trim((string) $client['deliveryAddress']) : '';
+    $notes  = isset($client['notes']) ? trim((string) $client['notes']) : '';
+
+    if ($name === '' || $phone === '' || $addr === '') {
+        return new WP_Error(
+            'bebba_missing_customer',
+            'Nom, téléphone et adresse de livraison sont obligatoires.',
+            array('status' => 400)
+        );
+    }
+    if (mb_strlen($name, 'UTF-8') > 128 || mb_strlen($addr, 'UTF-8') > 512) {
+        return new WP_Error('bebba_customer_too_long', 'Nom ou adresse trop long.', array('status' => 400));
+    }
+    $phone_normalise = bebba_normalize_phone($phone);
+    if ($phone_normalise === '' || strlen($phone_normalise) < 6) {
+        return new WP_Error('bebba_invalid_phone', 'Numéro de téléphone invalide.', array('status' => 400));
+    }
+
+    $items = isset($body['items']) && is_array($body['items']) ? $body['items'] : array();
+    if (empty($items)) {
+        return new WP_Error('bebba_empty_cart', 'Le panier est vide.', array('status' => 400));
+    }
+    if (count($items) > 50) {
+        return new WP_Error('bebba_too_many_items', 'Trop de lignes dans la commande (maximum 50).', array('status' => 400));
+    }
+
+    /* ---------- 6.2 Identité — ANTI-IDOR ---------- */
+    /* Le corps de la requête ne peut jamais désigner le client : seule la session
+       WordPress authentifiée fait foi. Aucun champ clientId n'est lu. */
+    $wp_customer_id = 0;
+    $caller_id      = 'guest:' . $phone_normalise;
+    if (is_user_logged_in()) {
+        $u = wp_get_current_user();
+        if ($u && in_array('bebba_client', (array) $u->roles, true)) {
+            $wp_customer_id = (int) $u->ID;
+            $caller_id      = 'client:' . $wp_customer_id;
+        }
+    }
+
+    /* ---------- 6.3 Préparation des lignes ---------- */
+    $index    = bebba_oc_ingredient_index();
+    $lignes   = array();
+    $produits = array();
+
+    foreach ($items as $position => $raw) {
+        if (!is_array($raw) || !isset($raw['productId'])) {
+            return new WP_Error('bebba_invalid_item', sprintf('Ligne %d invalide.', $position + 1), array('status' => 400));
+        }
+        $pid = (int) $raw['productId'];
+        $qte = isset($raw['quantity']) ? $raw['quantity'] : 1;
+        if (!is_numeric($qte) || (int) $qte != $qte || (int) $qte < 1 || (int) $qte > 100) {
+            return new WP_Error(
+                'bebba_invalid_quantity',
+                'La quantité doit être un nombre entier compris entre 1 et 100.',
+                array('status' => 400)
+            );
+        }
+        $qte = (int) $qte;
+
+        $produit = bebba_oc_load_product($pid);
+        if ($produit === null) {
+            return new WP_Error('bebba_unknown_product', sprintf('Produit #%d introuvable.', $pid), array('status' => 400));
+        }
+        if ((int) $produit->active !== 1) {
+            return new WP_Error(
+                'bebba_product_inactive',
+                sprintf('Le plat « %s » n\'est plus au catalogue.', $produit->name),
+                array('status' => 400)
+            );
+        }
+        if ((int) $produit->is_available !== 1) {
+            return new WP_Error(
+                'bebba_product_unavailable',
+                sprintf('Le plat « %s » est momentanément indisponible.', $produit->name),
+                array('status' => 400)
+            );
+        }
+
+        /* Résolution des options — le serveur ignore tout prix envoyé par le client */
+        $opt_protein = bebba_oc_resolve_option($produit->options, 'protein', isset($raw['proteinOption']) ? $raw['proteinOption'] : null);
+        if (is_wp_error($opt_protein)) {
+            return $opt_protein;
+        }
+        $opt_veggies = bebba_oc_resolve_option($produit->options, 'veggies', isset($raw['veggiesOption']) ? $raw['veggiesOption'] : null);
+        if (is_wp_error($opt_veggies)) {
+            return $opt_veggies;
+        }
+        $opt_base = bebba_oc_resolve_option($produit->options, 'base', isset($raw['baseChoice']) ? $raw['baseChoice'] : null);
+        if (is_wp_error($opt_base)) {
+            return $opt_base;
+        }
+
+        /* Suppléments — accepte {id: quantité} ou [{id, quantity}] */
+        $sup_dispo = array();
+        foreach ($produit->supplements as $s) {
+            $sup_dispo[(int) $s->id] = $s;
+        }
+        $sup_demande = array();
+        $sup_brut = isset($raw['supplements']) ? $raw['supplements'] : array();
+        if (is_array($sup_brut)) {
+            foreach ($sup_brut as $cle => $valeur) {
+                if (is_array($valeur)) {
+                    $sid = isset($valeur['id']) ? (int) $valeur['id'] : 0;
+                    $sq  = isset($valeur['quantity']) ? (int) $valeur['quantity'] : 1;
+                } else {
+                    $sid = (int) $cle;
+                    $sq  = (int) $valeur;
+                }
+                if ($sid > 0 && $sq > 0) {
+                    $sup_demande[$sid] = isset($sup_demande[$sid]) ? $sup_demande[$sid] + $sq : $sq;
+                }
+            }
+        }
+
+        $sup_resolus = array();
+        foreach ($sup_demande as $sid => $sq) {
+            if ($sq > 100) {
+                return new WP_Error('bebba_invalid_supplement', 'Quantité de supplément trop élevée.', array('status' => 400));
+            }
+            if (!isset($sup_dispo[$sid])) {
+                return new WP_Error(
+                    'bebba_invalid_supplement',
+                    sprintf('Le supplément #%d n\'est pas proposé avec le plat « %s ».', $sid, $produit->name),
+                    array('status' => 400)
+                );
+            }
+            $s = $sup_dispo[$sid];
+            if ((int) $s->active !== 1 || (int) $s->available !== 1) {
+                return new WP_Error(
+                    'bebba_supplement_unavailable',
+                    sprintf('Le supplément « %s » n\'est plus disponible.', $s->name),
+                    array('status' => 400)
+                );
+            }
+            $sup_resolus[] = array(
+                'id'                    => (int) $s->id,
+                'legacy_id'             => $s->legacy_id,
+                'name'                  => $s->name,
+                'price'                 => round((float) $s->price, 2),
+                'quantity'              => $sq,
+                'ingredient_id'         => $s->ingredient_id !== null ? (int) $s->ingredient_id : null,
+                'ingredient_legacy_id'  => $s->ingredient_legacy_id,
+                'ingredient_name'       => $s->ingredient_name_snapshot,
+                'quantity_consumed'     => round((float) $s->quantity_consumed, 2),
+                'unit'                  => $s->unit !== null ? $s->unit : 'g',
+            );
+        }
+
+        /* Recette normalisée */
+        $recette = array();
+        foreach ($produit->recipe as $r) {
+            if ($r->ingredient_legacy_id === null || $r->ingredient_legacy_id === '') {
+                continue;
+            }
+            if ($r->ingredient_active !== null && (int) $r->ingredient_active === 0) {
+                return new WP_Error(
+                    'bebba_ingredient_inactive',
+                    sprintf(
+                        'Le plat « %s » ne peut pas être commandé : l\'ingrédient « %s » est désactivé.',
+                        $produit->name,
+                        $r->ingredient_name !== null ? $r->ingredient_name : $r->ingredient_name_snapshot
+                    ),
+                    array('status' => 400)
+                );
+            }
+            $recette[] = array(
+                'legacy' => $r->ingredient_legacy_id,
+                'name'   => $r->ingredient_name_snapshot,
+                'qty'    => (float) $r->quantity,
+                'unit'   => $r->unit !== null ? $r->unit : 'g',
+            );
+        }
+        if (empty($recette)) {
+            return new WP_Error(
+                'bebba_product_without_recipe',
+                sprintf('Le plat « %s » n\'a pas de fiche technique.', $produit->name),
+                array('status' => 400)
+            );
+        }
+
+        /* Prix unitaire — recalculé intégralement côté serveur */
+        $prix = round((float) $produit->base_price, 2);
+        if ($opt_protein) { $prix += $opt_protein['extra_price']; }
+        if ($opt_veggies) { $prix += $opt_veggies['extra_price']; }
+        if ($opt_base)    { $prix += $opt_base['extra_price']; }
+        foreach ($sup_resolus as $s) {
+            $prix += $s['price'] * $s['quantity'];
+        }
+        $prix = round($prix, 2);
+
+        $consommation = bebba_oc_compute_consumption($recette, $opt_protein, $opt_veggies, $opt_base, $sup_resolus, $index);
+
+        $lignes[] = array(
+            'produit'      => $produit,
+            'quantity'     => $qte,
+            'unit_price'   => $prix,
+            'item_total'   => round($prix * $qte, 2),
+            'protein'      => $opt_protein,
+            'veggies'      => $opt_veggies,
+            'base'         => $opt_base,
+            'supplements'  => $sup_resolus,
+            'consommation' => $consommation,
+            'note'         => isset($raw['specialInstructions']) ? trim((string) $raw['specialInstructions']) : '',
+        );
+
+        /* Index du produit mis en cache pour éviter un rechargement à l'insertion */
+        $produits[$pid] = $produit;
+    }
+
+    /* ---------- 6.4 Idempotence ---------- */
+    $idem_key = $request->get_header('Idempotency-Key');
+    $idem_key = $idem_key !== null ? trim($idem_key) : '';
+    if (strlen($idem_key) > 128) {
+        return new WP_Error('bebba_invalid_idempotency_key', 'Clé d\'idempotence trop longue.', array('status' => 400));
+    }
+
+    $payload_pour_hash = array(
+        'caller_id'                 => $caller_id,
+        'customer_name'             => $name,
+        'customer_phone_normalized' => $phone_normalise,
+        'delivery_address'          => $addr,
+        'customer_notes'            => $notes,
+        'items'                     => array(),
+    );
+    foreach ($lignes as $l) {
+        $sups_map = array();
+        foreach ($l['supplements'] as $s) {
+            $sups_map[(string) $s['id']] = (int) $s['quantity'];
+        }
+        $payload_pour_hash['items'][] = array(
+            'product_id'           => (int) $l['produit']->id,
+            'quantity'             => (int) $l['quantity'],
+            'protein_label'        => $l['protein'] ? $l['protein']['label'] : '',
+            'veggies_label'        => $l['veggies'] ? $l['veggies']['label'] : '',
+            'base_label'           => $l['base'] ? $l['base']['label'] : '',
+            'supplements'          => $sups_map,
+            'special_instructions' => $l['note'],
+        );
+    }
+    $request_hash = bebba_oc_canonical_hash($payload_pour_hash);
+
+    if ($idem_key !== '') {
+        $existante = $wpdb->get_row($wpdb->prepare(
+            "SELECT id, caller_id, request_hash, order_id
+             FROM bebba_order_idempotency WHERE idempotency_key = %s",
+            $idem_key
+        ));
+        if ($existante) {
+            if ($existante->caller_id !== $caller_id) {
+                return new WP_Error(
+                    'bebba_idempotency_forbidden',
+                    'Cette clé d\'idempotence appartient à un autre appelant.',
+                    array('status' => 403)
+                );
+            }
+            if ($existante->request_hash !== $request_hash) {
+                return new WP_Error(
+                    'bebba_idempotency_conflict',
+                    'Cette clé d\'idempotence a déjà servi pour une commande au contenu différent.',
+                    array('status' => 422)
+                );
+            }
+            $ordre = $wpdb->get_row($wpdb->prepare(
+                "SELECT id, order_number, tracking_token, status, subtotal, delivery_fee, total_amount, placed_at
+                 FROM bebba_orders WHERE id = %d",
+                (int) $existante->order_id
+            ));
+            if ($ordre) {
+                return new WP_REST_Response(bebba_oc_order_response($ordre, true), 200);
+            }
+        }
+    }
+
+    /* ---------- 6.5 Déduction du stock nécessaire (mémoire, aucune écriture) ---------- */
+    $besoins = array(); /* legacy_id => quantité totale requise */
+    foreach ($lignes as $l) {
+        foreach ($l['consommation'] as $legacy => $c) {
+            $total = round($c['qty'] * $l['quantity'], 2);
+            if (!isset($besoins[$legacy])) {
+                $besoins[$legacy] = 0.0;
+            }
+            $besoins[$legacy] = round($besoins[$legacy] + $total, 2);
+        }
+    }
+
+    foreach (array_keys($besoins) as $legacy) {
+        if (!isset($index[$legacy])) {
+            return new WP_Error(
+                'bebba_unknown_ingredient',
+                sprintf('Ingrédient « %s » introuvable dans le stock.', $legacy),
+                array('status' => 400)
+            );
+        }
+        if ((int) $index[$legacy]['active'] === 0) {
+            return new WP_Error(
+                'bebba_ingredient_inactive',
+                sprintf('L\'ingrédient « %s » est désactivé.', $index[$legacy]['name']),
+                array('status' => 400)
+            );
+        }
+    }
+
+    /* ---------- 6.6 TRANSACTION ---------- */
+    $suppress = $wpdb->suppress_errors(true);
+    $wpdb->query('START TRANSACTION');
+
+    try {
+        /* a) Compteur verrouillé — contient le prochain numéro à attribuer */
+        $seq = $wpdb->get_var(
+            "SELECT current_value FROM bebba_counters WHERE counter_name = 'order_sequence' FOR UPDATE"
+        );
+        if ($seq === null) {
+            throw new Exception('Compteur de commande introuvable.');
+        }
+        /* bebba_counters.order_sequence contient LE PROCHAIN numéro à attribuer. */
+        $numero = (int) $seq;
+
+        /* b) Ingrédients verrouillés et contrôlés */
+        $legacy_list  = array_keys($besoins);
+        $placeholders = implode(',', array_fill(0, count($legacy_list), '%s'));
+        $lignes_stock = $wpdb->get_results($wpdb->prepare(
+            "SELECT id, legacy_id, name, unit, stock_quantity
+             FROM bebba_ingredients
+             WHERE legacy_id IN ($placeholders)
+             FOR UPDATE",
+            $legacy_list
+        ));
+        if (!$lignes_stock || count($lignes_stock) !== count($legacy_list)) {
+            throw new Exception('Verrouillage du stock incomplet.');
+        }
+
+        $stock_par_legacy = array();
+        foreach ($lignes_stock as $ls) {
+            $stock_par_legacy[$ls->legacy_id] = $ls;
+        }
+
+        $manquants = array();
+        foreach ($besoins as $legacy => $requis) {
+            $dispo = round((float) $stock_par_legacy[$legacy]->stock_quantity, 2);
+            if ($dispo < $requis) {
+                $manquants[] = array(
+                    'ingredient' => $stock_par_legacy[$legacy]->name,
+                    'required'   => $requis,
+                    'available'  => $dispo,
+                    'missing'    => round($requis - $dispo, 2),
+                    'unit'       => $stock_par_legacy[$legacy]->unit,
+                );
+            }
+        }
+        if (!empty($manquants)) {
+            $wpdb->query('ROLLBACK');
+            return new WP_Error(
+                'bebba_insufficient_stock',
+                'Stock insuffisant pour préparer cette commande.',
+                array('status' => 409, 'details' => $manquants)
+            );
+        }
+
+        /* c) Calcul des montants */
+        $sous_total = 0.0;
+        foreach ($lignes as $l) {
+            $sous_total = round($sous_total + $l['item_total'], 2);
+        }
+        $frais_livraison = round((float) get_option('bebba_delivery_fee', 2.50), 2);
+        $montant_total   = round($sous_total + $frais_livraison, 2);
+
+        $maintenant = current_time('mysql');
+        $horodatage = current_time('mysql') . '.000';
+        $jeton      = 'tk_' . bin2hex(random_bytes(6));
+        $legacy_ord = 'ord-' . round(microtime(true) * 1000) . '-' . bin2hex(random_bytes(3));
+        $num_commande = 'BEBBA-' . $numero;
+
+        $acteur = $wp_customer_id > 0
+            ? 'Client BEBBA (#' . $wp_customer_id . ')'
+            : 'Système Client';
+
+        /* d) Commande */
+        $ok = $wpdb->insert('bebba_orders', array(
+            'legacy_id'            => $legacy_ord,
+            'order_number'         => $num_commande,
+            'tracking_token'       => $jeton,
+            'placed_at'            => $maintenant,
+            'customer_name'        => $name,
+            'customer_phone'       => $phone,
+            'delivery_address'     => $addr,
+            'customer_notes'       => $notes === '' ? null : $notes,
+            'wp_customer_id'       => $wp_customer_id > 0 ? $wp_customer_id : null,
+            'subtotal'             => $sous_total,
+            'delivery_fee'         => $frais_livraison,
+            'total_amount'         => $montant_total,
+            'status'               => 'received',
+            'payment_status'       => 'to_collect',
+            'payment_method'       => 'cash_on_delivery',
+            'driver_id'            => null,
+            'driver_legacy_id'     => null,
+            'driver_name_snapshot' => null,
+            'stock_consumed'       => 1,
+            'idempotency_key'      => $idem_key === '' ? null : $idem_key,
+        ), array(
+            '%s','%s','%s','%s','%s','%s','%s','%s','%d','%f','%f','%f',
+            '%s','%s','%s','%d','%s','%s','%d','%s',
+        ));
+        if ($ok === false) {
+            throw new Exception('Insertion de la commande impossible : ' . $wpdb->last_error);
+        }
+        $order_id = (int) $wpdb->insert_id;
+
+        /* e) Lignes, fiches de préparation, suppléments */
+        foreach ($lignes as $l) {
+            $p = $l['produit'];
+
+            $lignes_recap = array();
+            foreach ($l['consommation'] as $c) {
+                $lignes_recap[] = sprintf('%s : %s %s', $c['name'], rtrim(rtrim(number_format($c['qty'], 2, '.', ''), '0'), '.'), $c['unit']);
+            }
+            if ($l['note'] !== '') {
+                $lignes_recap[] = 'NOTE CLIENT : « ' . $l['note'] . ' »';
+            }
+
+            $ok = $wpdb->insert('bebba_order_items', array(
+                'order_id'                    => $order_id,
+                'legacy_id'                   => 'item-' . bin2hex(random_bytes(4)),
+                'product_id'                  => (int) $p->id,
+                'product_legacy_id'           => $p->legacy_id,
+                'product_name_snapshot'       => $p->name,
+                'unit_price'                  => $l['unit_price'],
+                'quantity'                    => (int) $l['quantity'],
+                'protein_option_label'        => $l['protein'] ? $l['protein']['label'] : null,
+                'protein_option_extra_price'  => $l['protein'] ? $l['protein']['extra_price'] : null,
+                'protein_option_extra_grams'  => $l['protein'] ? $l['protein']['extra_grams'] : null,
+                'veggies_option_label'        => $l['veggies'] ? $l['veggies']['label'] : null,
+                'veggies_option_extra_price'  => $l['veggies'] ? $l['veggies']['extra_price'] : null,
+                'veggies_option_extra_grams'  => $l['veggies'] ? $l['veggies']['extra_grams'] : null,
+                'base_choice_label'           => $l['base'] ? $l['base']['label'] : null,
+                'base_choice_extra_price'     => $l['base'] ? $l['base']['extra_price'] : null,
+                'options_raw_json'            => wp_json_encode(array(
+                    'proteinOption' => $l['protein'],
+                    'veggiesOption' => $l['veggies'],
+                    'baseChoice'    => $l['base'],
+                )),
+                'special_instructions'        => $l['note'] === '' ? null : $l['note'],
+                'item_total_price'            => $l['item_total'],
+                'summary_lines_json'          => wp_json_encode($lignes_recap),
+            ));
+            if ($ok === false) {
+                throw new Exception('Insertion d\'une ligne de commande impossible : ' . $wpdb->last_error);
+            }
+            $item_id = (int) $wpdb->insert_id;
+
+            foreach ($l['consommation'] as $legacy => $c) {
+                $total_ligne = round($c['qty'] * $l['quantity'], 2);
+                $ok = $wpdb->insert('bebba_order_item_prep', array(
+                    'order_item_id'          => $item_id,
+                    'ingredient_id'          => isset($index[$legacy]) ? $index[$legacy]['id'] : null,
+                    'ingredient_legacy_id'   => $legacy,
+                    'ingredient_name_snapshot'=> $c['name'],
+                    'total_quantity'         => $total_ligne,
+                    'unit'                   => $c['unit'],
+                ));
+                if ($ok === false) {
+                    throw new Exception('Insertion d\'une ligne de préparation impossible : ' . $wpdb->last_error);
+                }
+            }
+
+            foreach ($l['supplements'] as $s) {
+                $ok = $wpdb->insert('bebba_order_item_supplements', array(
+                    'order_item_id'           => $item_id,
+                    'supplement_id'           => $s['id'],
+                    'supplement_legacy_id'    => $s['legacy_id'],
+                    'supplement_name_snapshot'=> $s['name'],
+                    'price'                   => $s['price'],
+                    'quantity'                => (int) $s['quantity'],
+                    'ingredient_id'           => $s['ingredient_id'],
+                    'ingredient_legacy_id'    => $s['ingredient_legacy_id'],
+                    'ingredient_name_snapshot'=> $s['ingredient_name'],
+                    'quantity_consumed'       => round($s['quantity_consumed'] * $s['quantity'], 2),
+                    'unit'                    => $s['unit'],
+                ));
+                if ($ok === false) {
+                    throw new Exception('Insertion d\'un supplément impossible : ' . $wpdb->last_error);
+                }
+            }
+        }
+
+        /* f) Historique de statut */
+        $ok = $wpdb->insert('bebba_order_status_history', array(
+            'order_id'   => $order_id,
+            'position'   => 0,
+            'status'     => 'received',
+            'label'      => 'Commande reçue & transmise à la cuisine',
+            'timestamp'  => $horodatage,
+            'note'       => 'Paiement à la livraison sélectionné',
+            'updated_by' => $acteur,
+        ), array('%d','%d','%s','%s','%s','%s','%s'));
+        if ($ok === false) {
+            throw new Exception('Insertion de l\'historique impossible : ' . $wpdb->last_error);
+        }
+
+        /* g) Décrément du stock + mouvements */
+        foreach ($besoins as $legacy => $requis) {
+            $ing = bebba_oc_stock_lookup($lignes_stock, $legacy);
+            if ($ing === null) {
+                throw new Exception('Ingrédient introuvable au moment du décrement : ' . $legacy);
+            }
+            $nouveau = round((float) $ing->stock_quantity - $requis, 2);
+            $ok = $wpdb->update(
+                'bebba_ingredients',
+                array('stock_quantity' => $nouveau),
+                array('id' => (int) $ing->id),
+                array('%f'),
+                array('%d')
+            );
+            if ($ok === false) {
+                throw new Exception('Mise à jour du stock impossible : ' . $wpdb->last_error);
+            }
+
+            $ok = $wpdb->insert('bebba_stock_movements', array(
+                'legacy_id'               => 'mov-' . round(microtime(true) * 1000) . '-' . bin2hex(random_bytes(3)),
+                'ingredient_id'           => (int) $ing->id,
+                'ingredient_legacy_id'    => $legacy,
+                'ingredient_name_snapshot'=> $ing->name,
+                'movement_type'           => 'order_consumption',
+                'quantity'                => -1 * $requis,
+                'unit'                    => $ing->unit,
+                'order_id'                => $order_id,
+                'order_legacy_id'         => $legacy_ord,
+                'order_number_snapshot'   => $num_commande,
+                'notes'                   => 'Consommation automatique commande #' . $num_commande,
+                'performed_by'            => $acteur,
+                'timestamp'               => $maintenant,
+            ), array('%s','%d','%s','%s','%s','%f','%s','%d','%s','%s','%s','%s','%s'));
+            if ($ok === false) {
+                throw new Exception('Insertion d\'un mouvement de stock impossible : ' . $wpdb->last_error);
+            }
+        }
+
+        /* h) Compteur incrémenté */
+        $ok = $wpdb->query($wpdb->prepare(
+            "UPDATE bebba_counters SET current_value = %d WHERE counter_name = 'order_sequence'",
+            $numero + 1
+        ));
+        if ($ok === false) {
+            throw new Exception('Mise à jour du compteur impossible.');
+        }
+
+        /* i) Référence d'idempotence */
+        if ($idem_key !== '') {
+            $ok = $wpdb->insert('bebba_order_idempotency', array(
+                'idempotency_key' => $idem_key,
+                'caller_id'       => $caller_id,
+                'request_hash'    => $request_hash,
+                'order_id'        => $order_id,
+                'order_legacy_id' => $legacy_ord,
+            ), array('%s','%s','%s','%d','%s'));
+            if ($ok === false) {
+                throw new Exception('Enregistrement de la clé d\'idempotence impossible : ' . $wpdb->last_error);
+            }
+        }
+
+        $wpdb->query('COMMIT');
+        $wpdb->suppress_errors($suppress);
+
+    } catch (Exception $e) {
+        $wpdb->query('ROLLBACK');
+        $wpdb->suppress_errors($suppress);
+        error_log('[BEBBA] Création de commande échouée : ' . $e->getMessage());
+        return new WP_Error(
+            'bebba_order_creation_failed',
+            'La commande n\'a pas pu être enregistrée. Aucun montant n\'a été débité et le stock n\'a pas été modifié.',
+            array('status' => 500)
+        );
+    }
+
+    $ordre = $wpdb->get_row($wpdb->prepare(
+        "SELECT id, order_number, tracking_token, status, subtotal, delivery_fee, total_amount, placed_at
+         FROM bebba_orders WHERE id = %d",
+        $order_id
+    ));
+
+    return new WP_REST_Response(bebba_oc_order_response($ordre, false), 201);
+}
+
+/**
+ * Retrouve une ligne verrouillée par identifiant legacy.
+ *
+ * @param array  $lignes_stock Résultat du SELECT ... FOR UPDATE.
+ * @param string $legacy       Identifiant legacy.
+ * @return object|null
+ */
+function bebba_oc_stock_lookup($lignes_stock, $legacy) {
+    foreach ($lignes_stock as $l) {
+        if ($l->legacy_id === $legacy) {
+            return $l;
+        }
+    }
+    return null;
+}
+
+/**
+ * Construit la réponse renvoyée au navigateur.
+ *
+ * @param object $ordre      Ligne de bebba_orders.
+ * @param bool   $est_existante Vrai si la commande existait déjà (idempotence).
+ * @return array
+ */
+function bebba_oc_order_response($ordre, $est_existante) {
+    return array(
+        'order_id'       => (int) $ordre->id,
+        'order_number'   => $ordre->order_number,
+        'tracking_token' => $ordre->tracking_token,
+        'status'         => $ordre->status,
+        'subtotal'       => (float) $ordre->subtotal,
+        'delivery_fee'   => (float) $ordre->delivery_fee,
+        'total_amount'   => (float) $ordre->total_amount,
+        'placed_at'      => $ordre->placed_at,
+        'is_existing'    => (bool) $est_existante,
+    );
+}
+
+/* ============================================================================
+ * 7. ENREGISTREMENT DE LA ROUTE REST
+ * ========================================================================== */
+
+/**
+ * Déclare POST /wp-json/bebba/v1/orders
+ */
+function bebba_oc_register_rest_routes() {
+    register_rest_route('bebba/v1', '/orders', array(
+        'methods'             => WP_REST_Server::CREATABLE,
+        'callback'            => 'bebba_rest_create_order',
+        'permission_callback' => '__return_true',
+    ));
+}
+add_action('rest_api_init', 'bebba_oc_register_rest_routes');
