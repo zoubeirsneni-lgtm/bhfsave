@@ -1137,3 +1137,183 @@ function bebba_oc_register_rest_routes() {
     ));
 }
 add_action('rest_api_init', 'bebba_oc_register_rest_routes');
+
+/* ============================================================================
+ * 8. PAGE DE COMMANDE
+ * ========================================================================== */
+
+/**
+ * Chemins du plugin, déduits de l'emplacement de ce fichier.
+ *
+ * @return array [dossier, url]
+ */
+function bebba_oc_paths() {
+    static $paths = null;
+    if ($paths === null) {
+        $principal = dirname(__DIR__) . '/bebba.php';
+        $paths = array(
+            'dir' => plugin_dir_path($principal),
+            'url' => plugin_dir_url($principal),
+        );
+    }
+    return $paths;
+}
+
+/**
+ * Charge les styles et le script de la page de commande.
+ */
+function bebba_oc_enqueue_checkout_assets() {
+    $chemins = bebba_oc_paths();
+    $version = '1.2.0';
+
+    wp_enqueue_style('bebba-menu', $chemins['url'] . 'assets/css/menu.css', array(), $version);
+    wp_enqueue_style('bebba-checkout', $chemins['url'] . 'assets/css/checkout.css', array('bebba-menu'), $version);
+    wp_enqueue_script('bebba-checkout', $chemins['url'] . 'assets/js/checkout.js', array(), $version, true);
+
+    $nom   = '';
+    $tel   = '';
+    if (is_user_logged_in()) {
+        $u = wp_get_current_user();
+        if ($u && in_array('bebba_client', (array) $u->roles, true)) {
+            $nom = trim($u->first_name . ' ' . $u->last_name);
+            if ($nom === '') {
+                $nom = $u->display_name;
+            }
+            $tel = (string) get_user_meta($u->ID, 'bebba_phone', true);
+        }
+    }
+
+    wp_localize_script('bebba-checkout', 'BEBBA_CHECKOUT', array(
+        'orders_url'     => esc_url_raw(rest_url('bebba/v1/orders')),
+        'nonce'          => wp_create_nonce('wp_rest'),
+        'currency'       => 'DT',
+        'delivery_fee'   => (float) get_option('bebba_delivery_fee', 2.50),
+        'menu_url'       => esc_url(home_url('/menu/')),
+        'login_url'      => esc_url(home_url('/connexion-bebba/')),
+        'is_logged_in'   => is_user_logged_in(),
+        'customer_name'  => $nom,
+        'customer_phone' => $tel,
+    ));
+}
+
+/**
+ * Rendu de la page de commande (shortcode [bebba_commande]).
+ *
+ * @return string HTML
+ */
+function bebba_render_checkout_page() {
+    bebba_oc_enqueue_checkout_assets();
+
+    ob_start();
+    ?>
+    <div id="bebba-checkout" class="bebba-checkout">
+
+        <header class="bebba-checkout__header">
+            <h1 class="bebba-checkout__title">Finaliser ma <span>commande</span></h1>
+            <a class="bebba-checkout__back" href="<?php echo esc_url(home_url('/menu/')); ?>">&larr; Retour au menu</a>
+        </header>
+
+        <?php /* ---------- Panier vide ---------- */ ?>
+        <div id="bebba-checkout-empty" class="bebba-checkout__empty" hidden>
+            <span class="bebba-checkout__empty-icon" aria-hidden="true">🛒</span>
+            <p class="bebba-checkout__empty-text">Votre panier est vide.</p>
+            <a class="bebba-checkout__empty-link" href="<?php echo esc_url(home_url('/menu/')); ?>">Voir le menu</a>
+        </div>
+
+        <?php /* ---------- Formulaire ---------- */ ?>
+        <div id="bebba-checkout-body" class="bebba-checkout__body">
+
+            <section class="bebba-checkout__recap" aria-labelledby="bebba-recap-title">
+                <h2 id="bebba-recap-title" class="bebba-checkout__section-title">Récapitulatif</h2>
+                <div id="bebba-checkout-summary" class="bebba-checkout__summary"></div>
+                <div class="bebba-checkout__totals">
+                    <div class="bebba-checkout__total-row">
+                        <span>Sous-total</span>
+                        <span id="bebba-checkout-subtotal">0.00 DT</span>
+                    </div>
+                    <div class="bebba-checkout__total-row">
+                        <span>Livraison</span>
+                        <span id="bebba-checkout-fee">0.00 DT</span>
+                    </div>
+                    <div class="bebba-checkout__total-row bebba-checkout__total-row--grand">
+                        <span>Total à payer</span>
+                        <strong id="bebba-checkout-total">0.00 DT</strong>
+                    </div>
+                    <p class="bebba-checkout__payment-note">💵 Paiement à la livraison (espèces)</p>
+                </div>
+            </section>
+
+            <section class="bebba-checkout__form-wrap" aria-labelledby="bebba-form-title">
+                <h2 id="bebba-form-title" class="bebba-checkout__section-title">Mes coordonnées</h2>
+
+                <form id="bebba-checkout-form" class="bebba-checkout__form" novalidate>
+
+                    <div class="bebba-checkout__field">
+                        <label for="bebba-field-name">Nom complet <span aria-hidden="true">*</span></label>
+                        <input type="text" id="bebba-field-name" name="name" autocomplete="name"
+                               maxlength="128" required placeholder="Ex. Sami Ben Ali">
+                    </div>
+
+                    <div class="bebba-checkout__field">
+                        <label for="bebba-field-phone">Téléphone <span aria-hidden="true">*</span></label>
+                        <input type="tel" id="bebba-field-phone" name="phone" autocomplete="tel"
+                               maxlength="32" required placeholder="Ex. +216 20 123 456">
+                    </div>
+
+                    <div class="bebba-checkout__field">
+                        <label for="bebba-field-address">Adresse de livraison <span aria-hidden="true">*</span></label>
+                        <textarea id="bebba-field-address" name="address" rows="3" maxlength="512" required
+                                  placeholder="Rue, immeuble, étage, ville"></textarea>
+                    </div>
+
+                    <div class="bebba-checkout__field">
+                        <label for="bebba-field-notes">Note pour la cuisine <span class="bebba-checkout__optional">(facultatif)</span></label>
+                        <textarea id="bebba-field-notes" name="notes" rows="2"
+                                  placeholder="Allergies, code d'accès, préférences…"></textarea>
+                    </div>
+
+                    <div id="bebba-checkout-message" class="bebba-checkout__message" role="alert" hidden></div>
+
+                    <button type="submit" id="bebba-checkout-submit" class="bebba-checkout__submit">
+                        <span id="bebba-checkout-submit-label">Confirmer la commande</span>
+                        <span id="bebba-checkout-submit-total" class="bebba-checkout__submit-total">0.00 DT</span>
+                    </button>
+
+                    <?php if (is_user_logged_in()) : ?>
+                        <p class="bebba-checkout__identity">Commande enregistrée sur votre compte BEBBA.</p>
+                    <?php else : ?>
+                        <p class="bebba-checkout__identity">
+                            Vous commandez en tant qu’invité.
+                            <a href="<?php echo esc_url(home_url('/connexion-bebba/')); ?>">Se connecter</a>
+                            pour retrouver vos commandes.
+                        </p>
+                    <?php endif; ?>
+
+                </form>
+            </section>
+
+        </div>
+
+        <?php /* ---------- Confirmation ---------- */ ?>
+        <div id="bebba-checkout-success" class="bebba-checkout__success" hidden>
+            <div class="bebba-checkout__success-icon" aria-hidden="true">✅</div>
+            <h2 class="bebba-checkout__success-title">Commande confirmée</h2>
+            <p class="bebba-checkout__success-number">
+                Votre numéro de commande<br>
+                <strong id="bebba-success-number">—</strong>
+            </p>
+            <p class="bebba-checkout__success-total">
+                Montant à régler à la livraison : <strong id="bebba-success-total">0.00 DT</strong>
+            </p>
+            <p class="bebba-checkout__success-note">
+                Conservez ce numéro. La cuisine prépare votre commande dès maintenant.
+            </p>
+            <a class="bebba-checkout__success-link" href="<?php echo esc_url(home_url('/menu/')); ?>">
+                Commander autre chose
+            </a>
+        </div>
+
+    </div>
+    <?php
+    return ob_get_clean();
+}

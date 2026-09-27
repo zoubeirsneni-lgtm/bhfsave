@@ -72,34 +72,9 @@ register_activation_hook(__FILE__, 'bebba_register_roles');
 register_activation_hook(__FILE__, 'bebba_create_pages');
 
 function bebba_commande_shortcode() {
-    bebba_enqueue_menu_assets();
-    ob_start();
-    ?>
-    <div id="bebba-menu" class="bebba-menu" role="main"></div>
-    <aside id="bebba-cart-panel" class="bebba-cart-panel" aria-label="Panier">
-        <div class="bebba-cart-panel__header">
-            <h2 class="bebba-cart-panel__title">🛒 Mon panier</h2>
-            <button id="bebba-cart-close" class="bebba-modal__close" aria-label="Fermer le panier">&times;</button>
-        </div>
-        <div id="bebba-cart-items" class="bebba-cart-panel__items"></div>
-        <div class="bebba-cart-panel__footer">
-            <div class="bebba-cart-panel__fee-row">
-                <span>Livraison</span>
-                <span id="bebba-delivery-fee">0.00 DT</span>
-            </div>
-            <div class="bebba-cart-panel__total-row">
-                <span>Total</span>
-                <strong id="bebba-cart-grand-total">0.00 DT</strong>
-            </div>
-            <a href="<?php echo esc_url(home_url('/commande/')); ?>" id="bebba-checkout-btn" class="bebba-checkout-btn">
-                Commander
-            </a>
-        </div>
-    </aside>
-    <div id="bebba-cart-backdrop" class="bebba-cart-backdrop" hidden></div>
-    <?php
-    return ob_get_clean();
+    return bebba_render_checkout_page();
 }
+
 add_shortcode('bebba_commande', 'bebba_commande_shortcode');
 
 /**

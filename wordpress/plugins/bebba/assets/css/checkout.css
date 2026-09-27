@@ -1,0 +1,360 @@
+/* =====================================================
+ * BEBBA Healthy Food — Page de commande v1.2.0
+ * assets/css/checkout.css
+ * Réutilise les jetons de design de menu.css (:root).
+ * ===================================================== */
+
+.bebba-checkout {
+  font-family: var(--bebba-font);
+  color: var(--bebba-text);
+  background: var(--bebba-off-white);
+  min-height: 60vh;
+  padding: 24px 16px 64px;
+}
+
+.bebba-checkout *,
+.bebba-checkout *::before,
+.bebba-checkout *::after {
+  box-sizing: border-box;
+}
+
+/* ── En-tête ── */
+.bebba-checkout__header {
+  max-width: 1080px;
+  margin: 0 auto 24px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.bebba-checkout__title {
+  font-size: clamp(1.5rem, 4vw, 2rem);
+  font-weight: 800;
+  line-height: 1.2;
+  margin: 0;
+  color: var(--bebba-text);
+}
+
+.bebba-checkout__title span { color: var(--bebba-green); }
+
+.bebba-checkout__back {
+  font-size: .9rem;
+  font-weight: 600;
+  color: var(--bebba-green);
+  text-decoration: none;
+}
+.bebba-checkout__back:hover { text-decoration: underline; }
+
+/* ── Panier vide ── */
+.bebba-checkout__empty {
+  max-width: 480px;
+  margin: 64px auto;
+  text-align: center;
+  padding: 40px 24px;
+  background: var(--bebba-white);
+  border: 1px solid var(--bebba-border);
+  border-radius: var(--bebba-radius);
+  box-shadow: var(--bebba-shadow);
+}
+
+.bebba-checkout__empty-icon { font-size: 3rem; display: block; margin-bottom: 12px; }
+
+.bebba-checkout__empty-text {
+  font-size: 1.05rem;
+  color: var(--bebba-text-muted);
+  margin: 0 0 20px;
+}
+
+.bebba-checkout__empty-link {
+  display: inline-block;
+  padding: 12px 28px;
+  background: var(--bebba-green);
+  color: var(--bebba-white);
+  border-radius: 999px;
+  font-weight: 700;
+  text-decoration: none;
+  transition: background var(--bebba-transition);
+}
+.bebba-checkout__empty-link:hover { background: var(--bebba-green-dark); }
+
+/* ── Grille formulaire / récapitulatif ── */
+.bebba-checkout__body {
+  max-width: 1080px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 24px;
+}
+
+@media (min-width: 900px) {
+  .bebba-checkout__body { grid-template-columns: 1fr 1fr; align-items: start; }
+}
+
+.bebba-checkout__recap,
+.bebba-checkout__form-wrap {
+  background: var(--bebba-white);
+  border: 1px solid var(--bebba-border);
+  border-radius: var(--bebba-radius);
+  padding: 24px;
+  box-shadow: var(--bebba-shadow);
+}
+
+.bebba-checkout__section-title {
+  font-size: 1.1rem;
+  font-weight: 800;
+  margin: 0 0 16px;
+  padding-bottom: 12px;
+  border-bottom: 2px solid var(--bebba-green-light);
+  color: var(--bebba-text);
+}
+
+/* ── Récapitulatif ── */
+.bebba-checkout__summary { display: flex; flex-direction: column; gap: 14px; }
+
+.bebba-checkout__line { border-bottom: 1px dashed var(--bebba-border); padding-bottom: 12px; }
+.bebba-checkout__line:last-child { border-bottom: none; padding-bottom: 0; }
+
+.bebba-checkout__line-main {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 10px;
+  align-items: start;
+}
+
+.bebba-checkout__line-qty {
+  font-weight: 800;
+  color: var(--bebba-green);
+  background: var(--bebba-green-light);
+  border-radius: var(--bebba-radius-sm);
+  padding: 2px 8px;
+  font-size: .85rem;
+  white-space: nowrap;
+}
+
+.bebba-checkout__line-name { font-weight: 700; font-size: .95rem; line-height: 1.3; }
+
+.bebba-checkout__line-opts {
+  font-size: .8rem;
+  color: var(--bebba-text-muted);
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
+.bebba-checkout__line-note {
+  font-size: .8rem;
+  color: var(--bebba-amber);
+  margin-top: 4px;
+  font-style: italic;
+}
+
+.bebba-checkout__line-price { font-weight: 700; font-size: .95rem; white-space: nowrap; }
+
+/* ── Totaux ── */
+.bebba-checkout__totals {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 2px solid var(--bebba-green-light);
+}
+
+.bebba-checkout__total-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  font-size: .95rem;
+  color: var(--bebba-text-muted);
+}
+
+.bebba-checkout__total-row--grand {
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--bebba-border);
+  font-size: 1.15rem;
+  color: var(--bebba-text);
+  font-weight: 700;
+}
+
+.bebba-checkout__total-row--grand strong { color: var(--bebba-green); font-size: 1.35rem; }
+
+.bebba-checkout__payment-note {
+  margin: 12px 0 0;
+  font-size: .85rem;
+  color: var(--bebba-text-muted);
+  background: var(--bebba-green-light);
+  border-radius: var(--bebba-radius-sm);
+  padding: 10px 12px;
+}
+
+/* ── Formulaire ── */
+.bebba-checkout__form { display: flex; flex-direction: column; gap: 16px; }
+
+.bebba-checkout__field { display: flex; flex-direction: column; gap: 6px; }
+
+.bebba-checkout__field label {
+  font-size: .88rem;
+  font-weight: 700;
+  color: var(--bebba-text);
+}
+
+.bebba-checkout__field label span[aria-hidden] { color: var(--bebba-red); }
+
+.bebba-checkout__optional { font-weight: 400; color: var(--bebba-text-muted); }
+
+.bebba-checkout__field input,
+.bebba-checkout__field textarea {
+  font-family: inherit;
+  font-size: .95rem;
+  color: var(--bebba-text);
+  background: var(--bebba-off-white);
+  border: 1.5px solid var(--bebba-border);
+  border-radius: var(--bebba-radius-sm);
+  padding: 11px 13px;
+  width: 100%;
+  transition: border-color var(--bebba-transition), box-shadow var(--bebba-transition);
+}
+
+.bebba-checkout__field textarea { resize: vertical; min-height: 64px; }
+
+.bebba-checkout__field input:focus,
+.bebba-checkout__field textarea:focus {
+  outline: none;
+  border-color: var(--bebba-green);
+  box-shadow: 0 0 0 3px var(--bebba-green-light);
+  background: var(--bebba-white);
+}
+
+/* ── Message d'erreur ── */
+.bebba-checkout__message {
+  border-radius: var(--bebba-radius-sm);
+  padding: 14px 16px;
+  font-size: .9rem;
+  line-height: 1.5;
+}
+
+.bebba-checkout__message--error {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+}
+
+.bebba-checkout__message--info {
+  background: var(--bebba-green-light);
+  border: 1px solid var(--bebba-border);
+  color: var(--bebba-green-dark);
+}
+
+.bebba-checkout__message p { margin: 0 0 8px; }
+.bebba-checkout__message p:last-child { margin-bottom: 0; }
+.bebba-checkout__message ul { margin: 0 0 8px; padding-left: 20px; }
+.bebba-checkout__message li { margin-bottom: 4px; }
+
+/* ── Bouton de validation ── */
+.bebba-checkout__submit {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 16px 22px;
+  background: var(--bebba-green);
+  color: var(--bebba-white);
+  border: none;
+  border-radius: 999px;
+  font-family: inherit;
+  font-size: 1rem;
+  font-weight: 800;
+  cursor: pointer;
+  transition: background var(--bebba-transition), transform var(--bebba-transition);
+}
+
+.bebba-checkout__submit:hover:not([disabled]) {
+  background: var(--bebba-green-dark);
+  transform: translateY(-1px);
+}
+
+.bebba-checkout__submit[disabled] {
+  background: var(--bebba-text-muted);
+  cursor: not-allowed;
+  opacity: .75;
+}
+
+.bebba-checkout__submit-total { font-size: 1.1rem; white-space: nowrap; }
+
+.bebba-checkout__identity {
+  margin: 0;
+  font-size: .82rem;
+  color: var(--bebba-text-muted);
+  text-align: center;
+}
+
+.bebba-checkout__identity a { color: var(--bebba-green); font-weight: 600; }
+
+/* ── Confirmation ── */
+.bebba-checkout__success {
+  max-width: 560px;
+  margin: 40px auto;
+  text-align: center;
+  padding: 40px 28px;
+  background: var(--bebba-white);
+  border: 2px solid var(--bebba-lime);
+  border-radius: var(--bebba-radius);
+  box-shadow: var(--bebba-shadow-lg);
+}
+
+.bebba-checkout__success-icon { font-size: 3rem; display: block; margin-bottom: 12px; }
+
+.bebba-checkout__success-title {
+  font-size: 1.5rem;
+  font-weight: 800;
+  color: var(--bebba-green-dark);
+  margin: 0 0 20px;
+}
+
+.bebba-checkout__success-number {
+  font-size: .95rem;
+  color: var(--bebba-text-muted);
+  margin: 0 0 16px;
+  line-height: 1.7;
+}
+
+.bebba-checkout__success-number strong {
+  display: inline-block;
+  font-size: 1.9rem;
+  letter-spacing: .04em;
+  color: var(--bebba-text);
+  background: var(--bebba-green-light);
+  border-radius: var(--bebba-radius-sm);
+  padding: 8px 20px;
+  margin-top: 6px;
+}
+
+.bebba-checkout__success-total {
+  font-size: 1rem;
+  color: var(--bebba-text);
+  margin: 0 0 12px;
+}
+.bebba-checkout__success-total strong { color: var(--bebba-green); }
+
+.bebba-checkout__success-note {
+  font-size: .88rem;
+  color: var(--bebba-text-muted);
+  margin: 0 0 24px;
+}
+
+.bebba-checkout__success-link {
+  display: inline-block;
+  padding: 12px 28px;
+  background: var(--bebba-green);
+  color: var(--bebba-white);
+  border-radius: 999px;
+  font-weight: 700;
+  text-decoration: none;
+  transition: background var(--bebba-transition);
+}
+.bebba-checkout__success-link:hover { background: var(--bebba-green-dark); }
+
+/* ── Référence inter-documents (édition WordPress) ── */
+.editor-styles-wrapper .bebba-checkout,
+.wp-block-post-content .bebba-checkout { padding-left: 0; padding-right: 0; }
